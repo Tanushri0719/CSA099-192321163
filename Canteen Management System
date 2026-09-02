@@ -1,0 +1,1652 @@
+import javax.swing.*;
+import javax.swing.border.*;
+import javax.swing.table.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.sql.*;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class CanteenManagementSystem extends JFrame {
+
+    // ================= DATABASE =================
+    static class DBConnection {
+        private static final String URL = "jdbc:mariadb://localhost:3306/canteen_db";
+        private static final String USER = "root";
+        private static final String PASSWORD = "";
+
+        static Connection getConnection() throws SQLException {
+            try {
+                Class.forName("org.mariadb.jdbc.Driver");
+            } catch (ClassNotFoundException e) {
+                throw new SQLException("MariaDB JDBC Driver not found.", e);
+            }
+            return DriverManager.getConnection(URL, USER, PASSWORD);
+        }
+    }
+
+    // ================= EXCEPTIONS =================
+    static class InvalidOrderException extends Exception {
+        InvalidOrderException(String message) { super(message); }
+    }
+
+    static class InsufficientStockException extends Exception {
+        InsufficientStockException(String message) { super(message); }
+    }
+
+    // ================= OOP: INHERITANCE + POLYMORPHISM =================
+    static abstract class User {
+        private int id;
+        private String name;
+        private String phone;
+
+        User(int id, String name, String phone) {
+            this.id = id;
+            this.name = name;
+            this.phone = phone;
+        }
+
+        int getId() { return id; }
+        String getName() { return name; }
+        String getPhone() { return phone; }
+
+        abstract String getUserType();
+    }
+
+    static class Student extends User {
+        Student(int id, String name, String phone) { super(id, name, phone); }
+        @Override String getUserType() { return "Student"; }
+    }
+
+    static class Faculty extends User {
+        Faculty(int id, String name, String phone) { super(id, name, phone); }
+        @Override String getUserType() { return "Faculty"; }
+    }
+
+    static class Staff extends User {
+        Staff(int id, String name, String phone) { super(id, name, phone); }
+        @Override String getUserType() { return "Staff"; }
+    }
+
+    static class FoodItem {
+        private int id;
+        private String name;
+        private String category;
+        private double price;
+        private int stock;
+
+        FoodItem(int id, String name, String category, double price, int stock) {
+            this.id = id;
+            this.name = name;
+            this.category = category;
+            this.price = price;
+            this.stock = stock;
+        }
+
+        int getId() { return id; }
+        String getName() { return name; }
+        String getCategory() { return category; }
+        double getPrice() { return price; }
+        int getStock() { return stock; }
+
+        void setStock(int stock) { this.stock = stock; }
+    }
+
+    static class OrderItem {
+        private int foodId;
+        private String foodName;
+        private double price;
+        private int quantity;
+
+        OrderItem(int foodId, String foodName, double price, int quantity) {
+            this.foodId = foodId;
+            this.foodName = foodName;
+            this.price = price;
+            this.quantity = quantity;
+        }
+
+        int getFoodId() { return foodId; }
+        String getFoodName() { return foodName; }
+        double getPrice() { return price; }
+        int getQuantity() { return quantity; }
+        void setQuantity(int quantity) { this.quantity = quantity; }
+        double getSubtotal() { return price * quantity; }
+    }
+
+    // ================= COLLECTIONS =================
+    private final ArrayList<FoodItem> foodList = new ArrayList<>();
+    private final HashMap<Integer, FoodItem> foodMap = new HashMap<>();
+    private final ArrayList<User> customers = new ArrayList<>();
+    private final ArrayList<OrderItem> cart = new ArrayList<>();
+    private final ArrayList<Integer> orderList = new ArrayList<>();
+
+    private final ExecutorService executor = Executors.newFixedThreadPool(5);
+
+    // ================= UI =================
+    private final Color NAVY = new Color(18, 31, 52);
+    private final Color NAVY2 = new Color(29, 48, 77);
+    private final Color ACCENT = new Color(45, 115, 210);
+    private final Color BG = new Color(244, 247, 251);
+    private final Color WHITE = Color.WHITE;
+    private final Color TEXT = new Color(35, 45, 60);
+    private final Color MUTED = new Color(105, 115, 130);
+
+    private JPanel contentPanel;
+    private JLabel pageTitle;
+    private JLabel statusLabel;
+
+    // Dashboard
+    private JLabel customerCountLabel, foodCountLabel, orderCountLabel, revenueLabel;
+
+    // Customer
+    private JTextField customerNameField, customerPhoneField, customerEmailField;
+    private JComboBox<String> customerTypeCombo;
+    private JTable customerTable;
+    private DefaultTableModel customerModel;
+
+    // Food
+    private JTextField foodIdField, foodNameField, foodCategoryField, foodPriceField, foodStockField, foodSearchField;
+    private JTable foodTable;
+    private DefaultTableModel foodModel;
+
+    // Order
+    private JTextField orderCustomerIdField, orderSearchField;
+    private JComboBox<String> orderFoodCombo;
+    private JSpinner quantitySpinner;
+    private JTable cartTable;
+    private DefaultTableModel cartModel;
+    private JLabel totalLabel;
+
+    // Admin
+    private JTable ordersTable;
+    private DefaultTableModel ordersModel;
+    private JComboBox<String> orderStatusCombo;
+
+    public CanteenManagementSystem() {
+        setTitle("Canteen Management System");
+        setSize(1250, 780);
+        setMinimumSize(new Dimension(1050, 680));
+        setLocationRelativeTo(null);
+        setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+
+        addWindowListener(new WindowAdapter() {
+            @Override public void windowClosing(WindowEvent e) {
+                shutdown();
+            }
+        });
+
+        buildUI();
+        loadFoodItems();
+        loadCustomers();
+        loadOrders();
+        updateDashboard();
+    }
+
+    // ================= UI BUILD =================
+    private void buildUI() {
+        JPanel root = new JPanel(new BorderLayout());
+        root.setBackground(BG);
+
+        root.add(createSidebar(), BorderLayout.WEST);
+
+        JPanel right = new JPanel(new BorderLayout());
+        right.setBackground(BG);
+        right.add(createHeader(), BorderLayout.NORTH);
+
+        contentPanel = new JPanel(new CardLayout());
+        contentPanel.setBackground(BG);
+
+        contentPanel.add(createDashboardPage(), "Dashboard");
+        contentPanel.add(createCustomersPage(), "Customers");
+        contentPanel.add(createFoodPage(), "Food Menu");
+        contentPanel.add(createOrderPage(), "Place Order");
+        contentPanel.add(createAdminPage(), "Orders / Admin");
+
+        right.add(contentPanel, BorderLayout.CENTER);
+        root.add(right, BorderLayout.CENTER);
+
+        setContentPane(root);
+        showPage("Dashboard");
+    }
+
+    private JPanel createSidebar() {
+        JPanel side = new JPanel(new BorderLayout());
+        side.setPreferredSize(new Dimension(225, 0));
+        side.setBackground(NAVY);
+
+        JPanel logo = new JPanel();
+        logo.setLayout(new BoxLayout(logo, BoxLayout.Y_AXIS));
+        logo.setBackground(NAVY);
+        logo.setBorder(new EmptyBorder(28, 22, 28, 22));
+
+        JLabel icon = new JLabel("CAFETERIA");
+        icon.setFont(new Font("SansSerif", Font.BOLD, 21));
+        icon.setForeground(Color.WHITE);
+        icon.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel subtitle = new JLabel("Management System");
+        subtitle.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        subtitle.setForeground(new Color(180, 195, 215));
+        subtitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        logo.add(icon);
+        logo.add(Box.createVerticalStrut(5));
+        logo.add(subtitle);
+
+        side.add(logo, BorderLayout.NORTH);
+
+        JPanel menu = new JPanel();
+        menu.setLayout(new BoxLayout(menu, BoxLayout.Y_AXIS));
+        menu.setBackground(NAVY);
+        menu.setBorder(new EmptyBorder(10, 12, 10, 12));
+
+        addNavButton(menu, "DASHBOARD", "Dashboard");
+        addNavButton(menu, "CUSTOMERS", "Customers");
+        addNavButton(menu, "FOOD MENU", "Food Menu");
+        addNavButton(menu, "PLACE ORDER", "Place Order");
+        addNavButton(menu, "ORDERS / ADMIN", "Orders / Admin");
+
+        menu.add(Box.createVerticalGlue());
+
+        JButton exit = navButton("EXIT");
+        exit.addActionListener(e -> shutdown());
+        menu.add(exit);
+
+        side.add(menu, BorderLayout.CENTER);
+
+        JLabel footer = new JLabel("  Java Swing + JDBC");
+        footer.setFont(new Font("SansSerif", Font.PLAIN, 11));
+        footer.setForeground(new Color(155, 170, 190));
+        footer.setBorder(new EmptyBorder(12, 8, 16, 8));
+        side.add(footer, BorderLayout.SOUTH);
+
+        return side;
+    }
+
+    private void addNavButton(JPanel menu, String text, String page) {
+        JButton b = navButton(text);
+        b.addActionListener(e -> showPage(page));
+        menu.add(b);
+        menu.add(Box.createVerticalStrut(6));
+    }
+
+    private JButton navButton(String text) {
+        JButton b = new JButton(text);
+        b.setMaximumSize(new Dimension(Integer.MAX_VALUE, 45));
+        b.setPreferredSize(new Dimension(195, 45));
+        b.setHorizontalAlignment(SwingConstants.LEFT);
+        b.setBorder(new EmptyBorder(0, 18, 0, 10));
+        b.setFocusPainted(false);
+        b.setForeground(new Color(220, 230, 242));
+        b.setBackground(NAVY);
+        b.setFont(new Font("SansSerif", Font.BOLD, 12));
+        b.setOpaque(true);
+        b.setBorderPainted(false);
+        b.addMouseListener(new MouseAdapter() {
+            public void mouseEntered(MouseEvent e) { b.setBackground(NAVY2); }
+            public void mouseExited(MouseEvent e) { b.setBackground(NAVY); }
+        });
+        return b;
+    }
+
+    private JPanel createHeader() {
+        JPanel header = new JPanel(new BorderLayout());
+        header.setBackground(WHITE);
+        header.setBorder(new CompoundBorder(
+                new MatteBorder(0, 0, 1, 0, new Color(225, 230, 237)),
+                new EmptyBorder(16, 24, 16, 24)
+        ));
+
+        pageTitle = new JLabel("Dashboard");
+        pageTitle.setFont(new Font("SansSerif", Font.BOLD, 24));
+        pageTitle.setForeground(TEXT);
+
+        statusLabel = new JLabel("System Ready");
+        statusLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        statusLabel.setForeground(MUTED);
+
+        JPanel p = new JPanel(new BorderLayout());
+        p.setOpaque(false);
+        p.add(pageTitle, BorderLayout.NORTH);
+        p.add(statusLabel, BorderLayout.SOUTH);
+
+        header.add(p, BorderLayout.WEST);
+        return header;
+    }
+
+    private JPanel pagePanel() {
+        JPanel p = new JPanel(new BorderLayout(15, 15));
+        p.setBackground(BG);
+        p.setBorder(new EmptyBorder(20, 24, 24, 24));
+        return p;
+    }
+
+    private JPanel cardPanel() {
+        JPanel p = new JPanel(new BorderLayout(10, 10));
+        p.setBackground(WHITE);
+        p.setBorder(new CompoundBorder(
+                new LineBorder(new Color(225, 230, 237)),
+                new EmptyBorder(18, 18, 18, 18)
+        ));
+        return p;
+    }
+
+    private JLabel sectionTitle(String text) {
+        JLabel l = new JLabel(text);
+        l.setFont(new Font("SansSerif", Font.BOLD, 17));
+        l.setForeground(TEXT);
+        return l;
+    }
+
+    private JButton actionButton(String text) {
+        JButton b = new JButton(text);
+        b.setFocusPainted(false);
+        b.setForeground(Color.WHITE);
+        b.setBackground(ACCENT);
+        b.setFont(new Font("SansSerif", Font.BOLD, 12));
+        b.setBorder(new EmptyBorder(10, 16, 10, 16));
+        b.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        b.setOpaque(true);
+        b.setBorderPainted(false);
+        return b;
+    }
+
+    private JButton secondaryButton(String text) {
+        JButton b = new JButton(text);
+        b.setFocusPainted(false);
+        b.setForeground(TEXT);
+        b.setBackground(new Color(235, 239, 245));
+        b.setFont(new Font("SansSerif", Font.BOLD, 12));
+        b.setBorder(new EmptyBorder(10, 16, 10, 16));
+        b.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        b.setOpaque(true);
+        b.setBorderPainted(false);
+        return b;
+    }
+
+    private JTextField textField() {
+        JTextField f = new JTextField();
+        f.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        f.setBorder(new CompoundBorder(
+                new LineBorder(new Color(210, 216, 225)),
+                new EmptyBorder(8, 10, 8, 10)
+        ));
+        return f;
+    }
+
+    private JLabel fieldLabel(String text) {
+        JLabel l = new JLabel(text);
+        l.setFont(new Font("SansSerif", Font.BOLD, 12));
+        l.setForeground(MUTED);
+        return l;
+    }
+
+    // ================= DASHBOARD =================
+    private JPanel createDashboardPage() {
+        JPanel page = pagePanel();
+
+        JPanel top = new JPanel(new GridLayout(1, 4, 15, 15));
+        top.setOpaque(false);
+
+        customerCountLabel = new JLabel("0");
+        foodCountLabel = new JLabel("0");
+        orderCountLabel = new JLabel("0");
+        revenueLabel = new JLabel("Rs.0.00");
+
+        top.add(statCard("CUSTOMERS", customerCountLabel));
+        top.add(statCard("FOOD ITEMS", foodCountLabel));
+        top.add(statCard("ORDERS", orderCountLabel));
+        top.add(statCard("REVENUE", revenueLabel));
+
+        JPanel bottom = cardPanel();
+        bottom.add(sectionTitle("Canteen Management System"), BorderLayout.NORTH);
+
+        JTextArea info = new JTextArea(
+                "Welcome to the Canteen Management System.\n\n" +
+                "Use the sidebar to manage customers, food items, orders and billing.\n\n" +
+                "Key features:\n" +
+                "- Customer registration\n" +
+                "- Food menu management with INSERT, UPDATE, DELETE and SELECT\n" +
+                "- Cart-based food ordering\n" +
+                "- Automatic stock validation and stock update\n" +
+                "- Automatic bill calculation\n" +
+                "- Order status management\n" +
+                "- JDBC database connectivity\n" +
+                "- Multithreaded order processing with synchronization\n" +
+                "- OOP concepts: encapsulation, inheritance and polymorphism"
+        );
+        info.setEditable(false);
+        info.setFont(new Font("SansSerif", Font.PLAIN, 14));
+        info.setForeground(TEXT);
+        info.setBackground(WHITE);
+        info.setBorder(new EmptyBorder(20, 5, 5, 5));
+        bottom.add(info, BorderLayout.CENTER);
+
+        JPanel quick = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        quick.setOpaque(false);
+        JButton reg = actionButton("Register Customer");
+        JButton food = actionButton("Manage Food");
+        JButton order = actionButton("Place New Order");
+        reg.addActionListener(e -> showPage("Customers"));
+        food.addActionListener(e -> showPage("Food Menu"));
+        order.addActionListener(e -> showPage("Place Order"));
+        quick.add(reg);
+        quick.add(food);
+        quick.add(order);
+        bottom.add(quick, BorderLayout.SOUTH);
+
+        page.add(top, BorderLayout.NORTH);
+        page.add(bottom, BorderLayout.CENTER);
+        return page;
+    }
+
+    private JPanel statCard(String title, JLabel value) {
+        JPanel p = new JPanel(new BorderLayout(5, 8));
+        p.setBackground(WHITE);
+        p.setBorder(new CompoundBorder(
+                new LineBorder(new Color(225, 230, 237)),
+                new EmptyBorder(18, 18, 18, 18)
+        ));
+
+        JLabel t = new JLabel(title);
+        t.setFont(new Font("SansSerif", Font.BOLD, 11));
+        t.setForeground(MUTED);
+
+        value.setFont(new Font("SansSerif", Font.BOLD, 27));
+        value.setForeground(ACCENT);
+
+        p.add(t, BorderLayout.NORTH);
+        p.add(value, BorderLayout.CENTER);
+        return p;
+    }
+
+    // ================= CUSTOMERS =================
+    private JPanel createCustomersPage() {
+        JPanel page = pagePanel();
+
+        JPanel form = cardPanel();
+        form.setPreferredSize(new Dimension(320, 0));
+        form.add(sectionTitle("Register Customer"), BorderLayout.NORTH);
+
+        JPanel fields = new JPanel(new GridLayout(8, 1, 5, 5));
+        fields.setOpaque(false);
+
+        customerNameField = textField();
+        customerPhoneField = textField();
+        customerEmailField = textField();
+        customerTypeCombo = new JComboBox<>(new String[]{"Student", "Faculty", "Staff"});
+
+        fields.add(fieldLabel("Name"));
+        fields.add(customerNameField);
+        fields.add(fieldLabel("Phone"));
+        fields.add(customerPhoneField);
+        fields.add(fieldLabel("Email"));
+        fields.add(customerEmailField);
+        fields.add(fieldLabel("User Type"));
+        fields.add(customerTypeCombo);
+        form.add(fields, BorderLayout.CENTER);
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        buttons.setOpaque(false);
+        JButton register = actionButton("REGISTER");
+        JButton clear = secondaryButton("CLEAR");
+
+        register.addActionListener(e -> registerCustomer());
+        clear.addActionListener(e -> clearCustomerForm());
+
+        buttons.add(register);
+        buttons.add(clear);
+        form.add(buttons, BorderLayout.SOUTH);
+
+        JPanel tableCard = cardPanel();
+        tableCard.add(sectionTitle("Registered Customers"), BorderLayout.NORTH);
+
+        customerModel = new DefaultTableModel(
+                new String[]{"ID", "Name", "Phone", "Email", "Type"}, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+        customerTable = new JTable(customerModel);
+        styleTable(customerTable);
+
+        tableCard.add(new JScrollPane(customerTable), BorderLayout.CENTER);
+
+        page.add(form, BorderLayout.WEST);
+        page.add(tableCard, BorderLayout.CENTER);
+        return page;
+    }
+
+    private void registerCustomer() {
+        String name = customerNameField.getText().trim();
+        String phone = customerPhoneField.getText().trim();
+        String email = customerEmailField.getText().trim();
+        String type = (String) customerTypeCombo.getSelectedItem();
+
+        if (name.isEmpty() || phone.isEmpty()) {
+            showError("Name and phone are required.");
+            return;
+        }
+
+        String sql = "INSERT INTO customers(name,phone,email,user_type) VALUES(?,?,?,?)";
+
+        try (Connection con = DBConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+
+            ps.setString(1, name);
+            ps.setString(2, phone);
+            ps.setString(3, email);
+            ps.setString(4, type);
+
+            ps.executeUpdate();
+            showSuccess("Customer registered successfully.");
+            clearCustomerForm();
+            loadCustomers();
+            updateDashboard();
+
+        } catch (SQLException e) {
+            showError("Customer registration failed:\n" + e.getMessage());
+        }
+    }
+
+    private void clearCustomerForm() {
+        customerNameField.setText("");
+        customerPhoneField.setText("");
+        customerEmailField.setText("");
+        customerTypeCombo.setSelectedIndex(0);
+    }
+
+    private void loadCustomers() {
+        if (customerModel == null) return;
+        customerModel.setRowCount(0);
+        customers.clear();
+
+        String sql = "SELECT customer_id,name,phone,email,user_type FROM customers ORDER BY customer_id";
+
+        try (Connection con = DBConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                int id = rs.getInt("customer_id");
+                String name = rs.getString("name");
+                String phone = rs.getString("phone");
+                String email = rs.getString("email");
+                String type = rs.getString("user_type");
+
+                customerModel.addRow(new Object[]{id, name, phone, email, type});
+
+                if ("Faculty".equalsIgnoreCase(type))
+                    customers.add(new Faculty(id, name, phone));
+                else if ("Staff".equalsIgnoreCase(type))
+                    customers.add(new Staff(id, name, phone));
+                else
+                    customers.add(new Student(id, name, phone));
+            }
+
+        } catch (SQLException e) {
+            showError("Could not load customers:\n" + e.getMessage());
+        }
+    }
+
+    // ================= FOOD =================
+    private JPanel createFoodPage() {
+        JPanel page = pagePanel();
+
+        JPanel top = cardPanel();
+        JPanel form = new JPanel(new GridLayout(2, 10, 8, 6));
+        form.setOpaque(false);
+
+        foodIdField = textField();
+        foodNameField = textField();
+        foodCategoryField = textField();
+        foodPriceField = textField();
+        foodStockField = textField();
+        foodSearchField = textField();
+
+        form.add(fieldLabel("Food ID"));
+        form.add(foodIdField);
+        form.add(fieldLabel("Food Name"));
+        form.add(foodNameField);
+        form.add(fieldLabel("Category"));
+        form.add(foodCategoryField);
+        form.add(fieldLabel("Price"));
+        form.add(foodPriceField);
+        form.add(fieldLabel("Stock"));
+        form.add(foodStockField);
+
+        form.add(fieldLabel("Search"));
+        form.add(foodSearchField);
+        form.add(new JLabel(""));
+        form.add(new JLabel(""));
+        form.add(new JLabel(""));
+        form.add(new JLabel(""));
+        form.add(new JLabel(""));
+        form.add(new JLabel(""));
+        form.add(new JLabel(""));
+        form.add(new JLabel(""));
+
+        top.add(form, BorderLayout.CENTER);
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        buttons.setOpaque(false);
+
+        JButton add = actionButton("ADD FOOD");
+        JButton update = actionButton("UPDATE");
+        JButton delete = secondaryButton("DELETE");
+        JButton search = secondaryButton("SEARCH");
+        JButton all = secondaryButton("SHOW ALL");
+        JButton clear = secondaryButton("CLEAR");
+
+        add.addActionListener(e -> addFood());
+        update.addActionListener(e -> updateFood());
+        delete.addActionListener(e -> deleteFood());
+        search.addActionListener(e -> searchFood());
+        all.addActionListener(e -> loadFoodItems());
+        clear.addActionListener(e -> clearFoodForm());
+
+        buttons.add(add);
+        buttons.add(update);
+        buttons.add(delete);
+        buttons.add(search);
+        buttons.add(all);
+        buttons.add(clear);
+        top.add(buttons, BorderLayout.SOUTH);
+
+        JPanel tableCard = cardPanel();
+        tableCard.add(sectionTitle("Available Food Menu"), BorderLayout.NORTH);
+
+        foodModel = new DefaultTableModel(
+                new String[]{"ID", "Food Name", "Category", "Price", "Stock", "Availability"}, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+
+        foodTable = new JTable(foodModel);
+        styleTable(foodTable);
+
+        foodTable.addMouseListener(new MouseAdapter() {
+            public void mouseClicked(MouseEvent e) {
+                int row = foodTable.getSelectedRow();
+                if (row >= 0) {
+                    foodIdField.setText(foodModel.getValueAt(row, 0).toString());
+                    foodNameField.setText(foodModel.getValueAt(row, 1).toString());
+                    foodCategoryField.setText(foodModel.getValueAt(row, 2).toString());
+                    foodPriceField.setText(foodModel.getValueAt(row, 3).toString());
+                    foodStockField.setText(foodModel.getValueAt(row, 4).toString());
+                }
+            }
+        });
+
+        tableCard.add(new JScrollPane(foodTable), BorderLayout.CENTER);
+
+        page.add(top, BorderLayout.NORTH);
+        page.add(tableCard, BorderLayout.CENTER);
+        return page;
+    }
+
+    private void addFood() {
+        try {
+            String name = foodNameField.getText().trim();
+            String category = foodCategoryField.getText().trim();
+            double price = Double.parseDouble(foodPriceField.getText().trim());
+            int stock = Integer.parseInt(foodStockField.getText().trim());
+
+            if (name.isEmpty() || category.isEmpty() || price < 0 || stock < 0)
+                throw new IllegalArgumentException("Enter valid food details.");
+
+            String sql = "INSERT INTO food_items(food_name,category,price,stock) VALUES(?,?,?,?)";
+
+            try (Connection con = DBConnection.getConnection();
+                 PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, name);
+                ps.setString(2, category);
+                ps.setDouble(3, price);
+                ps.setInt(4, stock);
+                ps.executeUpdate();
+            }
+
+            showSuccess("Food item added.");
+            clearFoodForm();
+            loadFoodItems();
+            updateDashboard();
+
+        } catch (NumberFormatException e) {
+            showError("Price and stock must be valid numbers.");
+        } catch (IllegalArgumentException | SQLException e) {
+            showError(e.getMessage());
+        }
+    }
+
+    private void updateFood() {
+        try {
+            int id = Integer.parseInt(foodIdField.getText().trim());
+            String name = foodNameField.getText().trim();
+            String category = foodCategoryField.getText().trim();
+            double price = Double.parseDouble(foodPriceField.getText().trim());
+            int stock = Integer.parseInt(foodStockField.getText().trim());
+
+            String sql = "UPDATE food_items SET food_name=?,category=?,price=?,stock=? WHERE food_id=?";
+
+            try (Connection con = DBConnection.getConnection();
+                 PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, name);
+                ps.setString(2, category);
+                ps.setDouble(3, price);
+                ps.setInt(4, stock);
+                ps.setInt(5, id);
+
+                if (ps.executeUpdate() == 0) {
+                    showError("Food ID not found.");
+                    return;
+                }
+            }
+
+            showSuccess("Food item updated.");
+            clearFoodForm();
+            loadFoodItems();
+
+        } catch (NumberFormatException e) {
+            showError("Enter valid Food ID, price and stock.");
+        } catch (SQLException e) {
+            showError("Update failed:\n" + e.getMessage());
+        }
+    }
+
+    private void deleteFood() {
+        try {
+            int id = Integer.parseInt(foodIdField.getText().trim());
+
+            int confirm = JOptionPane.showConfirmDialog(
+                    this, "Delete this food item?", "Confirm Delete",
+                    JOptionPane.YES_NO_OPTION);
+
+            if (confirm != JOptionPane.YES_OPTION) return;
+
+            String sql = "DELETE FROM food_items WHERE food_id=?";
+
+            try (Connection con = DBConnection.getConnection();
+                 PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setInt(1, id);
+                if (ps.executeUpdate() == 0) {
+                    showError("Food ID not found.");
+                    return;
+                }
+            }
+
+            showSuccess("Food item deleted.");
+            clearFoodForm();
+            loadFoodItems();
+            updateDashboard();
+
+        } catch (NumberFormatException e) {
+            showError("Enter a valid Food ID.");
+        } catch (SQLException e) {
+            showError("Delete failed. If the item is used in an order, it may not be deletable.\n" + e.getMessage());
+        }
+    }
+
+    private void searchFood() {
+        String keyword = foodSearchField.getText().trim();
+
+        if (keyword.isEmpty()) {
+            loadFoodItems();
+            return;
+        }
+
+        foodModel.setRowCount(0);
+        foodList.clear();
+        foodMap.clear();
+
+        String sql = "SELECT food_id,food_name,category,price,stock FROM food_items " +
+                     "WHERE food_name LIKE ? OR category LIKE ? ORDER BY food_id";
+
+        try (Connection con = DBConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+
+            ps.setString(1, "%" + keyword + "%");
+            ps.setString(2, "%" + keyword + "%");
+
+            ResultSet rs = ps.executeQuery();
+            fillFoodResults(rs);
+
+        } catch (SQLException e) {
+            showError("Search failed:\n" + e.getMessage());
+        }
+    }
+
+    private void loadFoodItems() {
+        if (foodModel == null) return;
+
+        foodModel.setRowCount(0);
+        foodList.clear();
+        foodMap.clear();
+
+        String sql = "SELECT food_id,food_name,category,price,stock FROM food_items ORDER BY food_id";
+
+        try (Connection con = DBConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            fillFoodResults(rs);
+
+        } catch (SQLException e) {
+            showError("Could not load food menu:\n" + e.getMessage());
+        }
+
+        refreshFoodCombo();
+    }
+
+    private void fillFoodResults(ResultSet rs) throws SQLException {
+        while (rs.next()) {
+            FoodItem f = new FoodItem(
+                    rs.getInt("food_id"),
+                    rs.getString("food_name"),
+                    rs.getString("category"),
+                    rs.getDouble("price"),
+                    rs.getInt("stock")
+            );
+
+            foodList.add(f);
+            foodMap.put(f.getId(), f);
+
+            foodModel.addRow(new Object[]{
+                    f.getId(),
+                    f.getName(),
+                    f.getCategory(),
+                    String.format(Locale.US, "%.2f", f.getPrice()),
+                    f.getStock(),
+                    f.getStock() > 0 ? "AVAILABLE" : "OUT OF STOCK"
+            });
+        }
+    }
+
+    private void clearFoodForm() {
+        foodIdField.setText("");
+        foodNameField.setText("");
+        foodCategoryField.setText("");
+        foodPriceField.setText("");
+        foodStockField.setText("");
+    }
+
+    // ================= ORDER =================
+    private JPanel createOrderPage() {
+        JPanel page = pagePanel();
+
+        JPanel top = cardPanel();
+
+        JPanel info = new JPanel(new GridLayout(2, 4, 10, 5));
+        info.setOpaque(false);
+
+        orderCustomerIdField = textField();
+        orderSearchField = textField();
+        orderFoodCombo = new JComboBox<>();
+        quantitySpinner = new JSpinner(new SpinnerNumberModel(1, 1, 100, 1));
+
+        info.add(fieldLabel("Customer ID"));
+        info.add(fieldLabel("Search Food"));
+        info.add(fieldLabel("Select Food"));
+        info.add(fieldLabel("Quantity"));
+
+        info.add(orderCustomerIdField);
+        info.add(orderSearchField);
+        info.add(orderFoodCombo);
+        info.add(quantitySpinner);
+
+        top.add(info, BorderLayout.CENTER);
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        actions.setOpaque(false);
+
+        JButton add = actionButton("ADD TO CART");
+        JButton search = secondaryButton("SEARCH");
+        JButton clearSearch = secondaryButton("SHOW ALL");
+        add.addActionListener(e -> addToCart());
+        search.addActionListener(e -> searchOrderFood());
+        clearSearch.addActionListener(e -> refreshFoodCombo());
+
+        actions.add(add);
+        actions.add(search);
+        actions.add(clearSearch);
+        top.add(actions, BorderLayout.SOUTH);
+
+        JPanel cartCard = cardPanel();
+        cartCard.add(sectionTitle("Current Order / Cart"), BorderLayout.NORTH);
+
+        cartModel = new DefaultTableModel(
+                new String[]{"Food ID", "Food Name", "Price", "Quantity", "Subtotal"}, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+
+        cartTable = new JTable(cartModel);
+        styleTable(cartTable);
+        cartCard.add(new JScrollPane(cartTable), BorderLayout.CENTER);
+
+        JPanel bottom = new JPanel(new BorderLayout());
+        bottom.setOpaque(false);
+
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        left.setOpaque(false);
+
+        JButton modify = secondaryButton("MODIFY QUANTITY");
+        JButton remove = secondaryButton("REMOVE");
+        JButton cancel = secondaryButton("CANCEL ORDER");
+        JButton place = actionButton("PLACE ORDER");
+
+        modify.addActionListener(e -> modifyCartQuantity());
+        remove.addActionListener(e -> removeFromCart());
+        cancel.addActionListener(e -> cancelCart());
+        place.addActionListener(e -> submitOrder());
+
+        left.add(modify);
+        left.add(remove);
+        left.add(cancel);
+        left.add(place);
+
+        totalLabel = new JLabel("Total: Rs.0.00");
+        totalLabel.setFont(new Font("SansSerif", Font.BOLD, 20));
+        totalLabel.setForeground(TEXT);
+
+        bottom.add(left, BorderLayout.WEST);
+        bottom.add(totalLabel, BorderLayout.EAST);
+
+        cartCard.add(bottom, BorderLayout.SOUTH);
+
+        page.add(top, BorderLayout.NORTH);
+        page.add(cartCard, BorderLayout.CENTER);
+        return page;
+    }
+
+    private void refreshFoodCombo() {
+        if (orderFoodCombo == null) return;
+
+        orderFoodCombo.removeAllItems();
+
+        for (FoodItem f : foodList) {
+            if (f.getStock() > 0) {
+                orderFoodCombo.addItem(
+                        f.getId() + " - " + f.getName() + " | Rs." +
+                        String.format(Locale.US, "%.2f", f.getPrice()) +
+                        " | Stock: " + f.getStock()
+                );
+            }
+        }
+    }
+
+    private void searchOrderFood() {
+        String keyword = orderSearchField.getText().trim().toLowerCase();
+
+        orderFoodCombo.removeAllItems();
+
+        for (FoodItem f : foodList) {
+            if (f.getStock() > 0 &&
+                (f.getName().toLowerCase().contains(keyword) ||
+                 f.getCategory().toLowerCase().contains(keyword))) {
+
+                orderFoodCombo.addItem(
+                        f.getId() + " - " + f.getName() + " | Rs." +
+                        String.format(Locale.US, "%.2f", f.getPrice()) +
+                        " | Stock: " + f.getStock()
+                );
+            }
+        }
+    }
+
+    private int selectedFoodId() {
+        Object selected = orderFoodCombo.getSelectedItem();
+        if (selected == null) return -1;
+
+        String s = selected.toString();
+        return Integer.parseInt(s.substring(0, s.indexOf(" - ")).trim());
+    }
+
+    private void addToCart() {
+        try {
+            int foodId = selectedFoodId();
+            if (foodId < 0) throw new InvalidOrderException("Select a food item.");
+
+            int qty = (Integer) quantitySpinner.getValue();
+            FoodItem f = foodMap.get(foodId);
+
+            if (f == null) throw new InvalidOrderException("Food item not found.");
+            if (qty <= 0) throw new InvalidOrderException("Quantity must be greater than zero.");
+
+            OrderItem existing = null;
+            for (OrderItem item : cart) {
+                if (item.getFoodId() == foodId) {
+                    existing = item;
+                    break;
+                }
+            }
+
+            int newQty = qty + (existing == null ? 0 : existing.getQuantity());
+
+            if (newQty > f.getStock()) {
+                throw new InsufficientStockException(
+                        "Only " + f.getStock() + " units of " + f.getName() + " are available."
+                );
+            }
+
+            if (existing == null)
+                cart.add(new OrderItem(f.getId(), f.getName(), f.getPrice(), qty));
+            else
+                existing.setQuantity(newQty);
+
+            refreshCart();
+            quantitySpinner.setValue(1);
+
+        } catch (NumberFormatException | InvalidOrderException | InsufficientStockException e) {
+            showError(e.getMessage());
+        }
+    }
+
+    private void refreshCart() {
+        cartModel.setRowCount(0);
+        double total = 0;
+
+        for (OrderItem item : cart) {
+            double subtotal = item.getSubtotal();
+            total += subtotal;
+
+            cartModel.addRow(new Object[]{
+                    item.getFoodId(),
+                    item.getFoodName(),
+                    String.format(Locale.US, "%.2f", item.getPrice()),
+                    item.getQuantity(),
+                    String.format(Locale.US, "%.2f", subtotal)
+            });
+        }
+
+        totalLabel.setText(String.format(Locale.US, "Total: Rs.%.2f", total));
+    }
+
+    private void modifyCartQuantity() {
+        int row = cartTable.getSelectedRow();
+
+        if (row < 0) {
+            showError("Select a cart item first.");
+            return;
+        }
+
+        try {
+            int newQty = Integer.parseInt(
+                    JOptionPane.showInputDialog(this, "Enter new quantity:")
+            );
+
+            if (newQty <= 0) throw new NumberFormatException();
+
+            OrderItem item = cart.get(row);
+            FoodItem food = foodMap.get(item.getFoodId());
+
+            if (food == null) {
+                showError("Food item no longer exists.");
+                return;
+            }
+
+            if (newQty > food.getStock()) {
+                showError("Insufficient stock. Available: " + food.getStock());
+                return;
+            }
+
+            item.setQuantity(newQty);
+            refreshCart();
+
+        } catch (Exception e) {
+            showError("Enter a valid quantity.");
+        }
+    }
+
+    private void removeFromCart() {
+        int row = cartTable.getSelectedRow();
+
+        if (row < 0) {
+            showError("Select a cart item first.");
+            return;
+        }
+
+        cart.remove(row);
+        refreshCart();
+    }
+
+    private void cancelCart() {
+        if (cart.isEmpty()) {
+            showError("Cart is already empty.");
+            return;
+        }
+
+        cart.clear();
+        refreshCart();
+        showSuccess("Current order cancelled.");
+    }
+
+    // ================= ORDER TRANSACTION + SYNCHRONIZATION =================
+    private synchronized void placeOrder(int customerId, ArrayList<OrderItem> orderCart)
+            throws Exception {
+
+        if (orderCart == null || orderCart.isEmpty())
+            throw new InvalidOrderException("Cart is empty.");
+
+        try (Connection con = DBConnection.getConnection()) {
+            con.setAutoCommit(false);
+
+            try {
+                // Verify customer
+                String customerSQL =
+                        "SELECT customer_id FROM customers WHERE customer_id=?";
+
+                try (PreparedStatement ps = con.prepareStatement(customerSQL)) {
+                    ps.setInt(1, customerId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next())
+                            throw new InvalidOrderException("Customer ID does not exist.");
+                    }
+                }
+
+                // Lock and verify stock
+                String stockSQL =
+                        "SELECT food_name,price,stock FROM food_items WHERE food_id=? FOR UPDATE";
+
+                double total = 0;
+
+                for (OrderItem item : orderCart) {
+                    try (PreparedStatement ps = con.prepareStatement(stockSQL)) {
+                        ps.setInt(1, item.getFoodId());
+
+                        try (ResultSet rs = ps.executeQuery()) {
+                            if (!rs.next())
+                                throw new InvalidOrderException(
+                                        "Food ID " + item.getFoodId() + " does not exist."
+                                );
+
+                            int stock = rs.getInt("stock");
+                            double price = rs.getDouble("price");
+                            String name = rs.getString("food_name");
+
+                            if (item.getQuantity() <= 0)
+                                throw new InvalidOrderException("Invalid quantity for " + name);
+
+                            if (item.getQuantity() > stock)
+                                throw new InsufficientStockException(
+                                        "Insufficient stock for " + name +
+                                        ". Available: " + stock
+                                );
+
+                            item.setQuantity(item.getQuantity());
+                            total += price * item.getQuantity();
+                        }
+                    }
+                }
+
+                // Insert order
+                int orderId;
+
+                String orderSQL =
+                        "INSERT INTO orders(customer_id,total_amount,status,order_date) " +
+                        "VALUES(?,?,?,CURRENT_TIMESTAMP)";
+
+                try (PreparedStatement ps = con.prepareStatement(
+                        orderSQL, Statement.RETURN_GENERATED_KEYS)) {
+
+                    ps.setInt(1, customerId);
+                    ps.setDouble(2, total);
+                    ps.setString(3, "PLACED");
+                    ps.executeUpdate();
+
+                    try (ResultSet keys = ps.getGeneratedKeys()) {
+                        if (!keys.next())
+                            throw new SQLException("Could not create order ID.");
+
+                        orderId = keys.getInt(1);
+                    }
+                }
+
+                // Insert order items and update stock
+                String itemSQL =
+                        "INSERT INTO order_items(order_id,food_id,quantity,price) VALUES(?,?,?,?)";
+
+                String updateStockSQL =
+                        "UPDATE food_items SET stock=stock-? WHERE food_id=?";
+
+                try (PreparedStatement itemPS = con.prepareStatement(itemSQL);
+                     PreparedStatement stockPS = con.prepareStatement(updateStockSQL)) {
+
+                    for (OrderItem item : orderCart) {
+                        double currentPrice;
+
+                        try (PreparedStatement pricePS = con.prepareStatement(
+                                "SELECT price FROM food_items WHERE food_id=?")) {
+                            pricePS.setInt(1, item.getFoodId());
+                            try (ResultSet rs = pricePS.executeQuery()) {
+                                if (!rs.next())
+                                    throw new InvalidOrderException("Food item unavailable.");
+                                currentPrice = rs.getDouble("price");
+                            }
+                        }
+
+                        itemPS.setInt(1, orderId);
+                        itemPS.setInt(2, item.getFoodId());
+                        itemPS.setInt(3, item.getQuantity());
+                        itemPS.setDouble(4, currentPrice);
+                        itemPS.executeUpdate();
+
+                        stockPS.setInt(1, item.getQuantity());
+                        stockPS.setInt(2, item.getFoodId());
+                        stockPS.executeUpdate();
+                    }
+                }
+
+                // Insert bill
+                String billSQL =
+                        "INSERT INTO bills(order_id,total_amount) VALUES(?,?)";
+
+                try (PreparedStatement ps = con.prepareStatement(billSQL)) {
+                    ps.setInt(1, orderId);
+                    ps.setDouble(2, total);
+                    ps.executeUpdate();
+                }
+
+                con.commit();
+                orderList.add(orderId);
+
+            } catch (Exception e) {
+                con.rollback();
+                throw e;
+            } finally {
+                con.setAutoCommit(true);
+            }
+        }
+    }
+
+    private void submitOrder() {
+        if (cart.isEmpty()) {
+            showError("Cart is empty.");
+            return;
+        }
+
+        try {
+            int customerId = Integer.parseInt(orderCustomerIdField.getText().trim());
+
+            String checkCustomer = "SELECT customer_id FROM customers WHERE customer_id=?";
+
+            try (Connection con = DBConnection.getConnection();
+                 PreparedStatement ps = con.prepareStatement(checkCustomer)) {
+
+                ps.setInt(1, customerId);
+
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        showError("Customer ID does not exist.\nPlease register first.");
+                        return;
+                    }
+                }
+
+            } catch (SQLException e) {
+                showError("Database Error:\n" + e.getMessage());
+                return;
+            }
+
+            ArrayList<OrderItem> orderCart = new ArrayList<>();
+
+            for (OrderItem item : cart) {
+                orderCart.add(new OrderItem(
+                        item.getFoodId(),
+                        item.getFoodName(),
+                        item.getPrice(),
+                        item.getQuantity()
+                ));
+            }
+
+            setStatus("Processing order in background...");
+
+            executor.submit(() -> {
+                try {
+                    placeOrder(customerId, orderCart);
+
+                    SwingUtilities.invokeLater(() -> {
+                        showSuccess("Order placed successfully!\nBill generated automatically.");
+                        cart.clear();
+                        refreshCart();
+                        loadFoodItems();
+                        loadOrders();
+                        updateDashboard();
+                        setStatus("Order completed successfully");
+                    });
+
+                } catch (Exception ex) {
+                    SwingUtilities.invokeLater(() -> {
+                        showError("Order failed:\n" + ex.getMessage());
+                        setStatus("Order failed");
+                    });
+                }
+            });
+
+        } catch (NumberFormatException e) {
+            showError("Enter a valid Customer ID.");
+        }
+    }
+
+    // ================= ADMIN / ORDERS =================
+    private JPanel createAdminPage() {
+        JPanel page = pagePanel();
+
+        JPanel top = cardPanel();
+
+        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        controls.setOpaque(false);
+
+        orderStatusCombo = new JComboBox<>(
+                new String[]{"PLACED", "PREPARING", "READY", "COMPLETED", "CANCELLED"}
+        );
+
+        JButton update = actionButton("UPDATE STATUS");
+        JButton refresh = secondaryButton("REFRESH");
+        JButton bill = secondaryButton("VIEW BILL");
+
+        update.addActionListener(e -> updateOrderStatus());
+        refresh.addActionListener(e -> {
+            loadOrders();
+            updateDashboard();
+        });
+        bill.addActionListener(e -> viewBill());
+
+        controls.add(new JLabel("New Status:"));
+        controls.add(orderStatusCombo);
+        controls.add(update);
+        controls.add(refresh);
+        controls.add(bill);
+
+        top.add(controls, BorderLayout.SOUTH);
+
+        JPanel tableCard = cardPanel();
+        tableCard.add(sectionTitle("Orders / Administration"), BorderLayout.NORTH);
+
+        ordersModel = new DefaultTableModel(
+                new String[]{"Order ID", "Customer ID", "Total", "Status", "Order Date"}, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+
+        ordersTable = new JTable(ordersModel);
+        styleTable(ordersTable);
+        tableCard.add(new JScrollPane(ordersTable), BorderLayout.CENTER);
+
+        page.add(top, BorderLayout.NORTH);
+        page.add(tableCard, BorderLayout.CENTER);
+        return page;
+    }
+
+    private void loadOrders() {
+        if (ordersModel == null) return;
+
+        ordersModel.setRowCount(0);
+        orderList.clear();
+
+        String sql =
+                "SELECT order_id,customer_id,total_amount,status,order_date " +
+                "FROM orders ORDER BY order_id DESC";
+
+        try (Connection con = DBConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                int orderId = rs.getInt("order_id");
+                orderList.add(orderId);
+
+                Timestamp date = rs.getTimestamp("order_date");
+
+                ordersModel.addRow(new Object[]{
+                        orderId,
+                        rs.getInt("customer_id"),
+                        String.format(Locale.US, "%.2f", rs.getDouble("total_amount")),
+                        rs.getString("status"),
+                        date == null ? "" :
+                                new SimpleDateFormat("dd-MM-yyyy HH:mm").format(new java.util.Date(date.getTime()))
+                });
+            }
+
+        } catch (SQLException e) {
+            showError("Could not load orders:\n" + e.getMessage());
+        }
+    }
+
+    private void updateOrderStatus() {
+        int row = ordersTable.getSelectedRow();
+
+        if (row < 0) {
+            showError("Select an order first.");
+            return;
+        }
+
+        int orderId = Integer.parseInt(ordersModel.getValueAt(row, 0).toString());
+        String status = (String) orderStatusCombo.getSelectedItem();
+
+        String sql = "UPDATE orders SET status=? WHERE order_id=?";
+
+        try (Connection con = DBConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+
+            ps.setString(1, status);
+            ps.setInt(2, orderId);
+
+            if (ps.executeUpdate() == 0) {
+                showError("Order not found.");
+                return;
+            }
+
+            showSuccess("Order status updated to " + status + ".");
+            loadOrders();
+
+        } catch (SQLException e) {
+            showError("Status update failed:\n" + e.getMessage());
+        }
+    }
+
+    private void viewBill() {
+        int row = ordersTable.getSelectedRow();
+
+        if (row < 0) {
+            showError("Select an order first.");
+            return;
+        }
+
+        int orderId = Integer.parseInt(ordersModel.getValueAt(row, 0).toString());
+
+        String customer = "";
+        String status = "";
+        double total = 0;
+        String date = "";
+
+        try (Connection con = DBConnection.getConnection()) {
+
+            String orderSQL =
+                    "SELECT o.customer_id,o.total_amount,o.status,o.order_date,c.name,c.phone " +
+                    "FROM orders o JOIN customers c ON o.customer_id=c.customer_id " +
+                    "WHERE o.order_id=?";
+
+            try (PreparedStatement ps = con.prepareStatement(orderSQL)) {
+                ps.setInt(1, orderId);
+
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        showError("Order not found.");
+                        return;
+                    }
+
+                    customer = rs.getString("name") + " (" + rs.getString("phone") + ")";
+                    status = rs.getString("status");
+                    total = rs.getDouble("total_amount");
+
+                    Timestamp ts = rs.getTimestamp("order_date");
+                    if (ts != null) {
+                        date = new SimpleDateFormat("dd-MM-yyyy HH:mm")
+                                .format(new java.util.Date(ts.getTime()));
+                    }
+                }
+            }
+
+            StringBuilder bill = new StringBuilder();
+            bill.append("========================================\n");
+            bill.append("          CANTEEN BILL RECEIPT          \n");
+            bill.append("========================================\n");
+            bill.append("Order ID : ").append(orderId).append("\n");
+            bill.append("Customer : ").append(customer).append("\n");
+            bill.append("Date     : ").append(date).append("\n");
+            bill.append("Status   : ").append(status).append("\n");
+            bill.append("----------------------------------------\n");
+
+            String itemSQL =
+                    "SELECT f.food_name,oi.quantity,oi.price " +
+                    "FROM order_items oi JOIN food_items f ON oi.food_id=f.food_id " +
+                    "WHERE oi.order_id=?";
+
+            try (PreparedStatement ps = con.prepareStatement(itemSQL)) {
+                ps.setInt(1, orderId);
+
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String name = rs.getString("food_name");
+                        int qty = rs.getInt("quantity");
+                        double price = rs.getDouble("price");
+                        double subtotal = qty * price;
+
+                        bill.append(String.format(Locale.US,
+                                "%-20s %3d x %7.2f = %8.2f%n",
+                                name, qty, price, subtotal));
+                    }
+                }
+            }
+
+            bill.append("----------------------------------------\n");
+            bill.append(String.format(Locale.US, "TOTAL: Rs.%.2f%n", total));
+            bill.append("========================================\n");
+            bill.append("          Thank you! Visit again.       \n");
+
+            JTextArea area = new JTextArea(bill.toString());
+            area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
+            area.setEditable(false);
+            area.setBackground(Color.WHITE);
+            area.setBorder(new EmptyBorder(15, 15, 15, 15));
+
+            JOptionPane.showMessageDialog(
+                    this, new JScrollPane(area),
+                    "Bill - Order #" + orderId,
+                    JOptionPane.INFORMATION_MESSAGE
+            );
+
+        } catch (SQLException e) {
+            showError("Could not display bill:\n" + e.getMessage());
+        }
+    }
+
+    // ================= DASHBOARD STATS =================
+    private void updateDashboard() {
+        if (customerCountLabel == null) return;
+
+        try (Connection con = DBConnection.getConnection()) {
+
+            try (PreparedStatement ps = con.prepareStatement(
+                    "SELECT COUNT(*) FROM customers");
+                 ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) customerCountLabel.setText(rs.getString(1));
+            }
+
+            try (PreparedStatement ps = con.prepareStatement(
+                    "SELECT COUNT(*) FROM food_items");
+                 ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) foodCountLabel.setText(rs.getString(1));
+            }
+
+            try (PreparedStatement ps = con.prepareStatement(
+                    "SELECT COUNT(*) FROM orders");
+                 ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) orderCountLabel.setText(rs.getString(1));
+            }
+
+            try (PreparedStatement ps = con.prepareStatement(
+                    "SELECT COALESCE(SUM(total_amount),0) FROM bills");
+                 ResultSet rs = ps.executeQuery()) {
+                if (rs.next())
+                    revenueLabel.setText(String.format(Locale.US, "Rs.%.2f", rs.getDouble(1)));
+            }
+
+        } catch (SQLException e) {
+            setStatus("Database connection error");
+        }
+    }
+
+    // ================= TABLE STYLE =================
+    private void styleTable(JTable table) {
+        table.setRowHeight(32);
+        table.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        table.setForeground(TEXT);
+        table.setBackground(Color.WHITE);
+        table.setGridColor(new Color(235, 238, 243));
+        table.setSelectionBackground(new Color(220, 232, 247));
+        table.setSelectionForeground(TEXT);
+        table.setShowVerticalLines(false);
+        table.setIntercellSpacing(new Dimension(0, 1));
+
+        JTableHeader header = table.getTableHeader();
+        header.setPreferredSize(new Dimension(0, 38));
+        header.setFont(new Font("SansSerif", Font.BOLD, 12));
+        header.setForeground(Color.WHITE);
+        header.setBackground(NAVY);
+        header.setOpaque(true);
+
+        DefaultTableCellRenderer center = new DefaultTableCellRenderer();
+        center.setHorizontalAlignment(SwingConstants.CENTER);
+
+        for (int i = 0; i < table.getColumnCount(); i++) {
+            if (i == 0 || i == 3 || i == 4)
+                table.getColumnModel().getColumn(i).setCellRenderer(center);
+        }
+    }
+
+    // ================= NAVIGATION =================
+    private void showPage(String page) {
+        pageTitle.setText(page);
+
+        CardLayout cl = (CardLayout) contentPanel.getLayout();
+        cl.show(contentPanel, page);
+
+        if ("Dashboard".equals(page)) updateDashboard();
+        if ("Customers".equals(page)) loadCustomers();
+        if ("Food Menu".equals(page)) loadFoodItems();
+        if ("Orders / Admin".equals(page)) loadOrders();
+        if ("Place Order".equals(page)) {
+            loadFoodItems();
+            refreshCart();
+        }
+
+        setStatus("Ready");
+    }
+
+    private void setStatus(String text) {
+        if (statusLabel != null)
+            statusLabel.setText(text);
+    }
+
+    private void showSuccess(String message) {
+        JOptionPane.showMessageDialog(this, message, "Success",
+                JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private void showError(String message) {
+        JOptionPane.showMessageDialog(this, message, "Error",
+                JOptionPane.ERROR_MESSAGE);
+    }
+
+    private void shutdown() {
+        executor.shutdownNow();
+        dispose();
+        System.exit(0);
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            } catch (Exception ignored) {}
+
+            new CanteenManagementSystem().setVisible(true);
+        });
+    }
+}
